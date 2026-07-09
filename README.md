@@ -67,27 +67,33 @@
 
 ## 🚀 Quick Start
 
+**Step 1 — Clone the repository**
+
 ```bash
-# 1. Clone the repository
 git clone https://github.com/algoanhaf/facebook-ssl-pinning-bypass.git
 cd facebook-ssl-pinning-bypass
-
-# 2. Set up Python environment
-python3 -m venv ssl-lab
-source ssl-lab/bin/activate        # Linux/macOS
-# ssl-lab\Scripts\activate.bat     # Windows
-
-# 3. Install all tools
-pip install frida==16.5.9 frida-tools objection mitmproxy
-
-# 4. Start frida-server on your device (needs root)
-adb shell su -c "/data/local/tmp/frida-server &"
-
-# 5. Run the bypass
-frida -U -f com.facebook.katana \
-      -l scripts/ssl_bypass_all.js \
-      --no-pause
 ```
+
+**Step 2 — Run the automated setup** (creates the virtual environment, installs every tool, and pushes a matching `frida-server`)
+
+```bash
+./setup.sh
+source ssl-lab/bin/activate
+```
+
+**Step 3 — Start frida-server on your device**
+
+```bash
+adb shell su -c "/data/local/tmp/frida-server &"
+```
+
+**Step 4 — Run the bypass**
+
+```bash
+python run.py com.facebook.katana --script all
+```
+
+That's it. Open the app, log in, and watch the traffic in mitmproxy. Full detail lives in [Lesson 3](lessons/03_walkthrough.md).
 
 ---
 
@@ -155,6 +161,12 @@ frida -U -f com.facebook.katana \
 │   ├── 📜 ssl_bypass_basic.js  ← Hook Android TrustManager
 │   └── 📜 ssl_bypass_okhttp.js ← Hook OkHttp3 CertificatePinner
 │
+├── 📁 .github/                 ← Issue & PR templates
+├── 🐍 run.py                   ← Spawns the app and injects a script
+├── ⚙️ setup.sh                 ← One-command lab bootstrap
+├── 📋 requirements.txt         ← Pinned Python dependencies
+├── 🔒 SECURITY.md              ← Responsible disclosure policy
+├── 🤝 CONTRIBUTING.md          ← Contribution guidelines
 ├── 📄 README.md
 └── 📄 LICENSE
 ```
@@ -179,7 +191,7 @@ The comprehensive bypass script. Hooks all major pinning layers:
 | 7 | Dynamic class enumeration | Auto-discovers anonymous TrustManager classes |
 
 ```bash
-frida -U -f com.facebook.katana -l scripts/ssl_bypass_all.js --no-pause
+python run.py com.facebook.katana --script all
 ```
 
 </details>
@@ -190,7 +202,7 @@ frida -U -f com.facebook.katana -l scripts/ssl_bypass_all.js --no-pause
 Targets the standard Java SSL stack. Good for apps that don't use OkHttp.
 
 ```bash
-frida -U -f <package_name> -l scripts/ssl_bypass_basic.js --no-pause
+python run.py <package_name> --script basic
 ```
 
 </details>
@@ -201,7 +213,7 @@ frida -U -f <package_name> -l scripts/ssl_bypass_basic.js --no-pause
 Targets OkHttp2 and OkHttp3 CertificatePinner plus Conscrypt internals.
 
 ```bash
-frida -U -f <package_name> -l scripts/ssl_bypass_okhttp.js --no-pause
+python run.py <package_name> --script okhttp
 ```
 
 </details>
@@ -257,12 +269,14 @@ Without Pinning:              With Pinning (Facebook):
 ### Verify Your Setup
 
 ```bash
-adb devices                          # See your device
-frida-ps -U | grep facebook          # Find the Facebook process
-frida --version                      # Must match frida-server version
+adb devices
+frida-ps -U | grep facebook
+frida --version
 objection --version
 mitmproxy --version
 ```
+
+`adb devices` shows your device, `frida-ps -U` confirms the client reaches the server, and `frida --version` must match the `frida-server` version on the device.
 
 ### Common Fixes
 
@@ -314,17 +328,27 @@ Scraping user data without authorization<br/>
 
 Contributions are welcome! Here's how:
 
+**Step 1 — Fork, then clone your fork**
+
 ```bash
-# Fork and clone
 git clone https://github.com/<your-username>/facebook-ssl-pinning-bypass.git
+```
 
-# Create a feature branch
+**Step 2 — Create a feature branch**
+
+```bash
 git checkout -b feature/your-feature-name
+```
 
-# Commit your changes
+**Step 3 — Commit your changes**
+
+```bash
 git commit -m "Add: description of your changes"
+```
 
-# Push and create a Pull Request
+**Step 4 — Push and open a Pull Request**
+
+```bash
 git push origin feature/your-feature-name
 ```
 

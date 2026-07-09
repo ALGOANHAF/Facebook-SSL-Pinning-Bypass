@@ -1,0 +1,15 @@
+ssl-lab/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+frida-server*
+*.apk
+*.mitm
+*.har
+captures/
+.DS_Store
+.idea/
+.vscode/
+*.log

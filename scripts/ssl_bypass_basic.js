@@ -1,106 +1,63 @@
-/**
- * ssl_bypass_basic.js
- *
- * Educational Frida script — hooks Android's X509TrustManager to disable
- * certificate validation. This targets the standard Java SSL stack.
- *
- * Run: frida -U -f <package> -l ssl_bypass_basic.js --no-pause
- *
- * FOR EDUCATIONAL PURPOSES ONLY.
- * Use only on applications and devices you own or have written permission to test.
- */
+'use strict';
+
+function log(msg) {
+    send({ tag: 'basic', msg: msg });
+}
 
 Java.perform(function () {
-    console.log('[*] ssl_bypass_basic.js loaded');
+    log('loaded');
 
-    // -------------------------------------------------------------------------
-    // Hook 1: SSLContext.init()
-    //
-    // SSLContext is the entry point for setting up an SSL connection.
-    // By injecting a permissive TrustManager here, we override whatever
-    // TrustManager the app specified — including a custom one with pinning logic.
-    // -------------------------------------------------------------------------
     var SSLContext = Java.use('javax.net.ssl.SSLContext');
+    var X509TrustManager = Java.use('javax.net.ssl.X509TrustManager');
+    var HostnameVerifier = Java.use('javax.net.ssl.HostnameVerifier');
+    var HttpsURLConnection = Java.use('javax.net.ssl.HttpsURLConnection');
+    var X509CertArray = Java.use('[Ljava.security.cert.X509Certificate;');
+
+    var TrustManager = Java.registerClass({
+        name: 'com.ssllab.TrustManager',
+        implements: [X509TrustManager],
+        methods: {
+            getAcceptedIssuers: function () {
+                return X509CertArray.$new(0);
+            },
+            checkClientTrusted: function (chain, authType) {},
+            checkServerTrusted: function (chain, authType) {
+                log('checkServerTrusted bypassed');
+            }
+        }
+    });
+
+    var Verifier = Java.registerClass({
+        name: 'com.ssllab.HostnameVerifier',
+        implements: [HostnameVerifier],
+        methods: {
+            verify: function (hostname, session) {
+                log('hostname accepted ' + hostname);
+                return true;
+            }
+        }
+    });
 
     SSLContext.init.overload(
         '[Ljavax.net.ssl.KeyManager;',
         '[Ljavax.net.ssl.TrustManager;',
         'java.security.SecureRandom'
-    ).implementation = function (keyManagers, trustManagers, secureRandom) {
-        console.log('[+] SSLContext.init() called — replacing TrustManager');
-
-        // Build a permissive TrustManager that accepts anything
-        var PermissiveTrustManager = Java.registerClass({
-            name: 'com.ssllab.PermissiveTrustManager',
-            implements: [Java.use('javax.net.ssl.X509TrustManager')],
-            methods: {
-                // Return no accepted issuers (accepts all)
-                getAcceptedIssuers: function () {
-                    return Java.use('[Ljava.security.cert.X509Certificate;').$new(0);
-                },
-                // Do nothing = accept any client cert
-                checkClientTrusted: function (chain, authType) {
-                    console.log('[+] checkClientTrusted called — skipping');
-                },
-                // Do nothing = accept any server cert (bypasses pinning)
-                checkServerTrusted: function (chain, authType) {
-                    console.log('[+] checkServerTrusted called — bypassing pin check');
-                }
-            }
-        });
-
-        var permissiveTM = [PermissiveTrustManager.$new()];
-        var TrustManagerArray = Java.use('[Ljavax.net.ssl.TrustManager;');
-
-        // Call the original init() but with our permissive TrustManager
-        this.init(keyManagers, permissiveTM, secureRandom);
+    ).implementation = function (km, tm, sr) {
+        log('SSLContext.init patched');
+        this.init(km, [TrustManager.$new()], sr);
     };
 
-    console.log('[+] Hook 1 active: SSLContext.init()');
-
-    // -------------------------------------------------------------------------
-    // Hook 2: HttpsURLConnection.setDefaultHostnameVerifier()
-    //
-    // This verifier checks that the hostname in the certificate matches the
-    // hostname being connected to. We replace it with one that always returns true.
-    // -------------------------------------------------------------------------
-    var HttpsURLConnection = Java.use('javax.net.ssl.HttpsURLConnection');
-
-    HttpsURLConnection.setDefaultHostnameVerifier.implementation = function (verifier) {
-        console.log('[+] setDefaultHostnameVerifier() called — replacing with permissive verifier');
-
-        var PermissiveVerifier = Java.registerClass({
-            name: 'com.ssllab.PermissiveHostnameVerifier',
-            implements: [Java.use('javax.net.ssl.HostnameVerifier')],
-            methods: {
-                verify: function (hostname, session) {
-                    console.log('[+] HostnameVerifier.verify() for: ' + hostname + ' — returning true');
-                    return true;
-                }
-            }
-        });
-
-        this.setDefaultHostnameVerifier(PermissiveVerifier.$new());
+    HttpsURLConnection.setDefaultHostnameVerifier.implementation = function (v) {
+        log('setDefaultHostnameVerifier patched');
+        this.setDefaultHostnameVerifier(Verifier.$new());
     };
 
-    console.log('[+] Hook 2 active: HttpsURLConnection.setDefaultHostnameVerifier()');
-
-    // -------------------------------------------------------------------------
-    // Hook 3: HttpsURLConnection.setSSLSocketFactory()
-    //
-    // Some apps set a custom SSLSocketFactory on individual connections.
-    // We replace it with one built from our permissive SSLContext.
-    // -------------------------------------------------------------------------
     HttpsURLConnection.setSSLSocketFactory.implementation = function (factory) {
-        console.log('[+] setSSLSocketFactory() called — replacing with permissive factory');
-
-        var permissiveSSLContext = Java.use('javax.net.ssl.SSLContext')
-            .getInstance('TLS');
-        permissiveSSLContext.init(null, null, null);
-
-        this.setSSLSocketFactory(permissiveSSLContext.getSocketFactory());
+        log('setSSLSocketFactory patched');
+        var ctx = SSLContext.getInstance('TLS');
+        ctx.init(null, [TrustManager.$new()], null);
+        this.setSSLSocketFactory(ctx.getSocketFactory());
     };
 
-    console.log('[+] Hook 3 active: HttpsURLConnection.setSSLSocketFactory()');
-    console.log('[*] ssl_bypass_basic.js — all hooks installed');
+    log('active');
 });

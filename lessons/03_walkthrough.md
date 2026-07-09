@@ -1,204 +1,184 @@
 # Lesson 3 — Tool Walkthrough
 
-> **Before you start:** Complete Lesson 1 (all tools installed, frida-server running, mitmproxy CA trusted system-wide). Create a **dummy Facebook account** — never use your real account in a lab.
+> **Educational use only.** Before starting, create a **dummy Facebook account**. Never use a real account in the lab.
+
+This lesson runs the full bypass end to end.
 
 ---
 
-## 3.1 Install Facebook on the Emulator
+## 3.1 Step 1 — Install the Target App
 
-Download the Facebook APK from a trusted mirror (APKPure, APKMirror). Do **not** use the Play Store in an emulator — it often detects the environment.
+Obtain the Facebook APK from a trusted mirror and install it.
 
 ```bash
-# Push APK to emulator and install it
 adb install -r Facebook.apk
 ```
 
-Verify it installed:
+Confirm the package is present.
+
 ```bash
 adb shell pm list packages | grep facebook
-# Expected: package:com.facebook.katana
 ```
+
+You should see `package:com.facebook.katana`.
 
 ---
 
-## 3.2 Confirm Pinning Is Active (Reproducing the Failure)
+## 3.2 Step 2 — Reproduce the Pinning Failure First
 
-This step is important — you need to see the failure *before* you bypass it so you understand what you're fixing.
+Seeing the failure before you fix it is the whole point of the exercise.
 
-**Terminal 1 — Start mitmproxy:**
+Start mitmproxy in one terminal.
+
 ```bash
-source ~/ssl-lab/bin/activate
-mitmproxy --listen-port 8080 --set block_global=false
+mitmproxy --listen-port 8080
 ```
 
-**Terminal 2 — Set device proxy:**
+Point the device at it in another terminal.
+
 ```bash
-# Replace 192.168.56.1 with your machine's LAN IP (ip addr show)
 adb shell settings put global http_proxy 192.168.56.1:8080
 ```
 
-Now open Facebook on the emulator and try to log in. You will see:
-- App shows "Network error" or hangs.
-- mitmproxy shows connection attempts that are quickly dropped.
-- `adb logcat` shows the pin failure:
+Open Facebook and try to log in. It hangs or shows a network error. Watch the pin rejection in the log.
 
 ```bash
-adb logcat | grep -i "pin\|ssl\|certificate" 2>/dev/null
+adb logcat | grep -iE "pin|ssl|certificate"
 ```
 
 ---
 
-## 3.3 Method A — Objection (Easiest, Best for Beginners)
+## 3.3 Step 3 — Confirm frida-server Is Running
 
-Objection wraps many common Frida hooks in a user-friendly CLI.
-
-**Terminal 1 — Make sure frida-server is running:**
 ```bash
 adb shell su -c "/data/local/tmp/frida-server &"
 ```
 
-**Terminal 2 — Launch Objection against the Facebook package:**
+---
+
+## 3.4 Method A — The Repository Runner (Recommended)
+
+The bundled runner spawns the app, injects the chosen script, and prints each hook as it fires.
+
 ```bash
-source ~/ssl-lab/bin/activate
+python run.py com.facebook.katana --script all
+```
+
+Expected output:
+
+```
+[19:20:01] spawning com.facebook.katana
+[19:20:02] [bypass] hooked SSLContext.init
+[19:20:02] [bypass] hooked okhttp3.CertificatePinner
+[19:20:02] [bypass] active
+[19:20:03] [bypass] okhttp3 graph.facebook.com
+```
+
+Switch to the emulator and log in. Traffic now flows through mitmproxy.
+
+If your device exposes Frida over TCP instead of USB, pass the host.
+
+```bash
+python run.py com.facebook.katana --script all --host 127.0.0.1:27042
+```
+
+---
+
+## 3.5 Method B — Objection (One Command)
+
+Objection wraps common hooks behind a single command.
+
+```bash
 objection --gadget com.facebook.katana explore
 ```
 
-You will land in the Objection console:
-```
-com.facebook.katana on (Android: 9) [usb] #
-```
+Inside the Objection console, disable pinning.
 
-**Disable SSL pinning with one command:**
 ```
 android sslpinning disable
 ```
 
-Objection will output something like:
-```
-(agent) Custom TrustManager ready
-(agent) Loaded OkHttp3 CertificatePinner hook
-(agent) SSLContext.init() hook installed
-(agent) Pinning disabled
-```
-
-Now switch to the emulator and log into Facebook. You should see traffic flowing through mitmproxy.
+Then log in on the emulator.
 
 ---
 
-## 3.4 Method B — Direct Frida Script
+## 3.6 Method C — Raw Frida CLI
 
-Using your own script gives you more control and teaches you what's actually happening.
+You can also load a script directly with the Frida CLI.
 
-**Terminal 1 — Run the basic bypass script:**
 ```bash
-source ~/ssl-lab/bin/activate
-frida -U -f com.facebook.katana \
-      -l scripts/ssl_bypass_all.js \
-      --no-pause
+frida -U -f com.facebook.katana -l scripts/ssl_bypass_all.js --no-pause
 ```
-
-Flag meanings:
-- `-U` — connect over USB (or to the USB-connected emulator).
-- `-f com.facebook.katana` — spawn (start) the app fresh.
-- `-l scripts/ssl_bypass_all.js` — load your hook script.
-- `--no-pause` — don't pause at startup (let the app run immediately).
-
-You should see hook confirmation messages in the terminal:
-```
-[*] Starting SSL Pinning Bypass
-[+] Hooked TrustManager.checkServerTrusted
-[+] Hooked OkHttp3 CertificatePinner.check()
-[+] Hooked SSLContext.init()
-[*] All hooks active — bypass running
-```
-
-Switch to the emulator and log in. Watch mitmproxy for HTTPS traffic.
 
 ---
 
-## 3.5 Attaching vs. Spawning
+## 3.7 Spawn, Not Attach
 
-| Mode | Command | When to use |
-|------|---------|-------------|
-| **Spawn** | `frida -U -f com.facebook.katana` | Inject before app code runs — catches early pinning |
-| **Attach** | `frida -U -n com.facebook.katana` | Attach to already-running app |
+Facebook runs its first pinned request before the login screen appears, so the hook must be in place before the app starts. Always spawn.
 
-Facebook performs pinning during the very first network request (often before the login screen loads), so **spawn mode is required** — attach mode is usually too late.
+| Mode | Flag | Result |
+|------|------|--------|
+| Spawn | `-f` (or `run.py`, which always spawns) | Hook installed before app code runs |
+| Attach | `-n` | Usually too late, pin already enforced |
 
 ---
 
-## 3.6 Inspecting Traffic in mitmproxy
+## 3.8 Step 4 — Inspect the Traffic
 
-Once the bypass is running and you're logged in, mitmproxy will show all HTTPS requests:
+With the bypass active and login complete, mitmproxy shows the live requests.
 
 ```
-GET  https://graph.facebook.com/v19.0/me?fields=id,name
-POST https://b-graph.facebook.com/auth/login
-GET  https://edge-chat.facebook.com/pull
+GET   https://graph.facebook.com/v19.0/me
+POST  https://b-graph.facebook.com/auth/login
+GET   https://edge-chat.facebook.com/pull
 ```
 
-**Useful mitmproxy keybindings:**
-- `↑↓` — navigate requests.
-- `Enter` — open a request.
-- `Tab` — switch between Request / Response.
-- `f` — filter (e.g., `~u facebook.com` to show only Facebook URLs).
-- `q` — quit / go back.
+Useful keys inside mitmproxy:
 
-You can also export traffic to HAR format for offline analysis:
+| Key | Action |
+|-----|--------|
+| Up / Down | Move between requests |
+| Enter | Open a request |
+| Tab | Switch request and response |
+| f | Filter, for example `~u facebook.com` |
+| q | Back or quit |
+
+To keep a capture for offline analysis, save the stream.
+
 ```bash
 mitmproxy --listen-port 8080 --save-stream-file capture.mitm
 ```
 
 ---
 
-## 3.7 Common Pitfalls and Fixes
+## 3.9 Step 5 — Capture One Specific Call
 
-### "Unable to connect to remote frida-server"
-frida-server crashed or was never started.
-```bash
-adb shell su -c "killall frida-server 2>/dev/null; /data/local/tmp/frida-server &"
+To isolate a single action, filter first, then perform it.
+
+Press `f` inside mitmproxy and enter a filter.
+
+```
+~m POST ~u graph.facebook.com
 ```
 
-### "App crashes immediately after hook"
-Facebook detects Frida via `/proc/<pid>/maps` checks. Solution: use a Frida gadget embedded in the APK (Lesson 4), or use the `--realm=emulated` flag and a patched frida-server.
-
-### "No traffic in mitmproxy even after bypass"
-- Verify proxy settings: `adb shell settings get global http_proxy`
-- Frida hook may have failed silently — check for error output in the terminal running `frida`.
-- Some Facebook endpoints use HTTP/2 ALPN — try: `mitmproxy --set http2=false`
-
-### "SSLError: certificate verify failed" in mitmproxy itself
-The mitmproxy CA cert was not installed in the system store. Re-do step 1.7 of the setup.
-
-### "Frida version mismatch"
-The Python `frida` package and `frida-server` binary must match exactly.
-```bash
-frida --version           # Python client version
-adb shell /data/local/tmp/frida-server --version   # server version
-```
-Download the frida-server that matches your Python client version.
+Perform the action in the app, for example liking a post. The matching request appears; press Enter to read its headers and body.
 
 ---
 
-## 3.8 Capturing a Specific API Call (Example)
+## 3.10 Troubleshooting
 
-Goal: capture the POST request Facebook sends when you like a post.
-
-1. In mitmproxy, press `f` and type: `~m POST ~u graph.facebook.com`
-2. Tap the Like button on a post in the emulator.
-3. A new entry appears in mitmproxy — press `Enter` to inspect it.
-4. The Request tab shows the endpoint, headers, and body (JSON or form-encoded).
-
-This is the kind of traffic analysis that security researchers use to understand API behavior, find insecure endpoints, or verify that an app does not leak sensitive data.
+| Symptom | Fix |
+|---------|-----|
+| Cannot connect to frida-server | `adb shell su -c "killall frida-server; /data/local/tmp/frida-server &"` |
+| App crashes right after injection | See anti-Frida handling in Lesson 4 |
+| No traffic despite bypass | Check the proxy with `adb shell settings get global http_proxy` |
+| mitmproxy TLS errors | The CA is not in the system store; redo Lesson 1 step 9 |
+| Version mismatch | `frida --version` must equal the server version |
 
 ---
 
 ## Summary
 
-You have now:
-- Confirmed SSL pinning blocks your proxy.
-- Used Objection to disable pinning in one command.
-- Used a raw Frida script for deeper control.
-- Captured and inspected Facebook HTTPS traffic.
+You reproduced the pin failure, neutralised it three different ways, and captured live Facebook traffic through mitmproxy.
 
-Proceed to [Lesson 4 — Advanced Techniques](04_advanced.md).
+Continue to [Lesson 4 — Advanced Techniques](04_advanced.md).

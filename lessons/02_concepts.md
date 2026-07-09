@@ -1,173 +1,123 @@
 # Lesson 2 — Core SSL/TLS Concepts
 
-## 2.1 How HTTPS Works (Quick Refresher)
+> **Educational use only.** Only test on devices and accounts you own.
 
-When your browser connects to `https://facebook.com`, the following happens:
-
-```
-Client (App)              Facebook Server
-    |                           |
-    |---- ClientHello --------->|  (supported cipher suites)
-    |<--- ServerHello ----------|  (chosen cipher + certificate)
-    |---- verifies cert ------->|  (is the cert trusted?)
-    |<--- Encrypted channel --->|  (data flows here)
-```
-
-The "verify cert" step is where SSL pinning matters.
+Before touching a single hook, you need a clear mental model of what pinning is and why a plain proxy cannot defeat it.
 
 ---
 
-## 2.2 Normal Certificate Validation
+## 2.1 The TLS Handshake in One Diagram
 
-Without pinning, the app trusts **any certificate signed by a Certificate Authority (CA)** in the system trust store. There are ~150 trusted CAs pre-installed on Android.
+```
+Client (App)                       Server
+    |------ ClientHello ------------->|
+    |<----- ServerHello + cert -------|
+    |------ verify certificate ------>|
+    |<===== encrypted channel =======>|
+```
 
-**Problem for security research:** If an attacker controls a CA (or installs their own CA on the device), they can perform a Man-in-the-Middle (MITM) attack and intercept the traffic.
-
-**This is exactly what mitmproxy does in a lab** — it installs its own CA and issues fake certs for every host. Without pinning, the app happily accepts them.
+Everything hinges on the **verify certificate** step. That is where pinning lives.
 
 ---
 
-## 2.3 What is SSL Pinning?
+## 2.2 Standard Certificate Validation
 
-SSL pinning is an extra check: the app doesn't just ask "is this cert signed by *any* trusted CA?" — it also asks "is this cert *specifically* the one I expect?"
+Without pinning, an app accepts any certificate signed by a Certificate Authority in the system trust store. Android ships with roughly 150 trusted CAs.
 
-### Certificate Pinning
-The app stores the **full DER-encoded certificate** and compares it byte-by-byte.
+The weakness for an attacker, and the opportunity for a researcher, is that if you can add a CA to the device, you can mint certificates the app will accept. That is exactly what mitmproxy does: it installs its own CA and issues a fresh certificate for every host on the fly.
+
+---
+
+## 2.3 What Pinning Adds
+
+Pinning adds a second question after the CA check passes:
+
+> Is this the *specific* certificate or key I was built to expect?
+
+**Certificate pinning** compares the full certificate byte for byte.
+
+**Public key pinning** compares only the SHA-256 of the public key. This is more common because it survives certificate renewal as long as the key pair is unchanged.
+
+When a proxy presents its own certificate, the CA check may pass, but the pin comparison fails:
 
 ```
-Stored pin:  SHA-256(facebook.com's cert) = "abc123..."
-Received:    SHA-256(mitmproxy's fake cert) = "xyz789..."
-Result:      MISMATCH → connection refused
-```
-
-### Public Key Pinning (more common, more flexible)
-The app stores only the **public key hash** (SPKI hash). This survives certificate renewal as long as the key pair stays the same.
-
-```
-Stored pin:  SHA-256(facebook.com's public key) = "abc123..."
-Received:    SHA-256(mitmproxy's fake public key) = "xyz789..."
-Result:      MISMATCH → connection refused
+Expected pin : sha256/AbCdEf...   (the app's built-in value)
+Received     : sha256/XyZ123...   (the proxy's key)
+Result       : mismatch, connection aborted
 ```
 
 ---
 
-## 2.4 How Facebook Implements Pinning
+## 2.4 How Facebook Pins
 
-Facebook's Android app (`com.facebook.katana`) uses multiple pinning layers:
+Facebook's Android client (`com.facebook.katana`) enforces pinning at three layers.
 
-### Layer 1 — OkHttp CertificatePinner
-Facebook uses the [OkHttp](https://square.github.io/okhttp/) HTTP library. OkHttp has a built-in `CertificatePinner` class:
+**Layer 1 — OkHttp CertificatePinner.** Facebook's HTTP stack is built on OkHttp, whose `CertificatePinner` compares the server key against a hardcoded list and throws `SSLPeerUnverifiedException` on mismatch.
 
-```java
-// Pseudocode — what Facebook's code looks like internally
-CertificatePinner pinner = new CertificatePinner.Builder()
-    .add("*.facebook.com", "sha256/AbCdEfGhIjKlMnOpQrStUvWxYz...")
-    .add("*.facebook.com", "sha256/BaCkUpPiNhAsH...")   // backup pin
-    .build();
+**Layer 2 — Custom TrustManager.** A custom `X509TrustManager` performs additional validation beyond the standard CA path.
 
-OkHttpClient client = new OkHttpClient.Builder()
-    .certificatePinner(pinner)
-    .build();
-```
+**Layer 3 — Network Security Config.** On Android 7 and above, pins can be declared in `res/xml/network_security_config.xml` and enforced by the OS itself, independent of the app code.
 
-When `CertificatePinner.check()` is called, it compares the server's cert to the pinned hashes. If none match, it throws `SSLPeerUnverifiedException`.
-
-### Layer 2 — Custom X509TrustManager
-Facebook also registers a custom `TrustManager` that performs additional validation beyond standard CA verification.
-
-### Layer 3 — Network Security Config (Android 7+)
-`res/xml/network_security_config.xml` can define pins at the OS level:
-
-```xml
-<network-security-config>
-    <domain-config>
-        <domain includeSubdomains="true">facebook.com</domain>
-        <pin-set>
-            <pin digest="SHA-256">AbCdEfGh...</pin>
-        </pin-set>
-    </domain-config>
-</network-security-config>
-```
+Because there are three layers, a reliable bypass has to neutralise all of them. That is why the comprehensive script in this lab hooks each one.
 
 ---
 
-## 2.5 Why Burp Fails Without a Bypass
+## 2.5 Why Burp or mitmproxy Alone Fails
 
-Let's trace what happens when you point the Facebook app at Burp:
+Trace what happens when you point the app at a proxy with its CA already trusted:
 
-```
-1. App starts TLS handshake with graph.facebook.com
-2. Burp intercepts and presents its own certificate
-3. Burp's cert is signed by "PortSwigger CA" (trusted by system store after install)
-4. Android's standard validation: PASS  (it's a valid cert)
-5. OkHttp CertificatePinner.check():
-       Expected: sha256/AbCdEf... (Facebook's real key)
-       Got:      sha256/XyZaBc... (Burp's key)
-       → throws SSLPeerUnverifiedException
-6. App crashes or shows "Network error"
-```
+1. The app opens a TLS connection to a Facebook host.
+2. The proxy presents its own certificate.
+3. Standard CA validation passes, because the proxy CA is trusted.
+4. OkHttp `CertificatePinner.check()` compares the key hash to its pinned values.
+5. The hashes do not match, so it throws and the request dies.
+6. The app shows a network error.
 
-You can confirm this by enabling verbose logging:
+You can watch this happen in the device log.
 
 ```bash
-adb logcat | grep -i "ssl\|certificate\|pinning\|okhttp"
-```
-
-You'll see messages like:
-```
-Certificate pinning failure!
-  Peer certificate chain: ...
-  Pinned certificates for graph.facebook.com: ...
+adb logcat | grep -iE "ssl|certificate|pinning|okhttp"
 ```
 
 ---
 
-## 2.6 Static vs. Dynamic Pinning Bypass
+## 2.6 Static vs Dynamic Bypass
 
-### Static Bypass (Patch the APK)
-Decompile the APK → find the pinning code → remove or patch it → recompile and sign.
+**Static bypass** modifies the APK itself: decompile, patch the pinning code, recompile, re-sign. It is persistent but brittle, breaks on every app update, and re-signing can trip integrity checks.
 
-- **Pros:** Persistent, doesn't require Frida at runtime.
-- **Cons:** Complex, breaks with each app update, requires re-signing (may trigger integrity checks).
+**Dynamic bypass** injects Frida into the running process and replaces the pinning methods at runtime. It needs root and a running server, but it is fast, reversible, and shows you exactly which methods you are neutralising.
 
-### Dynamic Bypass (Frida/Objection at runtime)
-Inject a Frida script into the running process → hook the pinning methods → replace their logic.
-
-- **Pros:** No APK modification needed, fast to iterate.
-- **Cons:** Requires root, Frida server, and re-hooking after process restart.
-
-**In this lab we use dynamic bypass** — it's faster and more educational because you can see exactly which Java methods are being hooked.
+This lab uses dynamic bypass.
 
 ---
 
-## 2.7 Frida Architecture (How Hooks Work)
+## 2.7 How Frida Injection Works
 
 ```
-Your Machine                   Android Device
-┌─────────────────┐           ┌──────────────────────────┐
-│  frida CLI      │           │  frida-server (root)     │
-│  (Python venv)  │◄─ USB ───►│  ↕ ptrace / /proc/mem   │
-│                 │           │  Target App Process       │
-│  Your .js hook  │           │  ┌────────────────────┐  │
-│  is uploaded    │──────────►│  │ Hooked Java methods │  │
-└─────────────────┘           │  └────────────────────┘  │
-                               └──────────────────────────┘
+Your machine                 Android device
++-------------+              +------------------------+
+| frida CLI   |              | frida-server (root)    |
+| run.py      |==== USB ====>| ptrace into target     |
+| .js hook    |              | +--------------------+  |
++-------------+              | | hooked Java methods |  |
+                             | +--------------------+  |
+                             +------------------------+
 ```
 
-Frida uses `ptrace` (Linux system call) to inject a tiny shared library into the target process. That library executes your JavaScript hook inside the process's memory. When the app calls `CertificatePinner.check()`, your hook runs instead — and you decide whether to let it proceed or skip the check.
+Frida uses `ptrace` to inject a small agent into the target process. Your JavaScript runs inside that process, so when the app calls `CertificatePinner.check()`, your replacement runs instead and decides whether to enforce the pin.
 
 ---
 
-## Summary of Key Terms
+## Glossary
 
 | Term | Meaning |
 |------|---------|
-| **CA** | Certificate Authority — a trusted entity that signs certificates |
-| **SPKI** | Subject Public Key Info — the public key portion of a cert |
-| **MITM** | Man-in-the-Middle — intercepting traffic between two parties |
-| **CertificatePinner** | OkHttp class that enforces pinning |
-| **TrustManager** | Android interface for certificate validation logic |
-| **Frida** | Dynamic instrumentation framework using JS hooks |
-| **Objection** | Frida-based toolkit with pre-built mobile security hooks |
+| CA | Certificate Authority that signs certificates |
+| SPKI | Subject Public Key Info, the key portion of a certificate |
+| MITM | Man-in-the-middle interception |
+| CertificatePinner | OkHttp class that enforces pinning |
+| TrustManager | Android interface for certificate validation |
+| Frida | Dynamic instrumentation framework |
+| Objection | Frida toolkit with prebuilt hooks |
 
-Proceed to [Lesson 3 — Tool Walkthrough](03_walkthrough.md).
+Continue to [Lesson 3 — Tool Walkthrough](03_walkthrough.md).
